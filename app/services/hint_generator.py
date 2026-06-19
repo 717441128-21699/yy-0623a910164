@@ -3,14 +3,16 @@ import numpy as np
 from typing import List, Dict
 from datetime import date
 
+from app.services.image_utils import imread_unicode_gray
+
 
 class HintGenerator:
     def __init__(self):
         pass
 
     def calculate_image_diff(self, before_path: str, after_path: str) -> float:
-        before = cv2.imread(before_path, cv2.IMREAD_GRAYSCALE)
-        after = cv2.imread(after_path, cv2.IMREAD_GRAYSCALE)
+        before = imread_unicode_gray(before_path)
+        after = imread_unicode_gray(after_path)
 
         if before is None or after is None:
             return 0.0
@@ -24,8 +26,8 @@ class HintGenerator:
         return diff_score
 
     def calculate_alignment_change(self, before_path: str, after_path: str, angle: str) -> Dict:
-        before = cv2.imread(before_path, cv2.IMREAD_GRAYSCALE)
-        after = cv2.imread(after_path, cv2.IMREAD_GRAYSCALE)
+        before = imread_unicode_gray(before_path)
+        after = imread_unicode_gray(after_path)
 
         if before is None or after is None:
             return {"change_level": "unknown", "score": 0}

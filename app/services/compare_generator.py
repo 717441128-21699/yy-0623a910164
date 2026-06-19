@@ -6,6 +6,7 @@ from typing import List, Tuple, Dict
 import os
 
 from app.config import COMPARE_DIR
+from app.services.image_utils import imread_unicode, imwrite_unicode
 
 
 class CompareGenerator:
@@ -61,8 +62,8 @@ class CompareGenerator:
 
     def create_pair_comparison(self, before_path: str, after_path: str, angle: str,
                                 before_label: str, after_label: str) -> np.ndarray:
-        before_img = cv2.imread(before_path)
-        after_img = cv2.imread(after_path)
+        before_img = imread_unicode(before_path)
+        after_img = imread_unicode(after_path)
 
         if before_img is None or after_img is None:
             return None
@@ -155,7 +156,7 @@ class CompareGenerator:
         output_filename = f"compare_{patient_no}_{compare_mode}_{before_date}_{after_date}.jpg"
         output_path = self.output_dir / output_filename
 
-        cv2.imwrite(str(output_path), result, [cv2.IMWRITE_JPEG_QUALITY, 90])
+        imwrite_unicode(str(output_path), result)
 
         return str(output_path)
 

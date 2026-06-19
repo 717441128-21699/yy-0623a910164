@@ -2,6 +2,7 @@ import cv2
 import numpy as np
 from typing import Tuple
 from app.config import settings
+from app.services.image_utils import imread_unicode
 
 
 class QualityChecker:
@@ -78,7 +79,7 @@ class QualityChecker:
         return has_occlusion, occlusion_notes
 
     def analyze(self, image_path: str, angle: str) -> dict:
-        img = cv2.imread(image_path)
+        img = imread_unicode(image_path)
         if img is None:
             return {
                 "brightness": 0,
