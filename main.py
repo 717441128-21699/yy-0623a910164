@@ -56,7 +56,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title=settings.app_name,
     version=settings.app_version,
-    description="正畸复诊拍照对比后端服务 v1.2.0：提供照片质量检查、对比图生成、智能提示、接入方(API Key)隔离与管理、配额限流、回调通知(含详细执行记录)，可无缝嵌入现有口腔管理系统。",
+    description="正畸复诊拍照对比后端服务 v1.3.0：提供照片质量检查、对比图生成、智能提示、接入方(API Key)隔离与管理、配额限流(含照片批量额度)、回调通知(含详细执行记录)，无Key请求归入默认接入方，可无缝嵌入现有口腔管理系统。",
     lifespan=lifespan
 )
 
@@ -91,10 +91,11 @@ async def root():
         "features": [
             "access_control: API Key 接入方隔离",
             "data_isolation: 患者/照片/对比按接入方隔离",
-            "quota_control: 每日API/照片配额 + 对比开关",
+            "quota_control: 每日API/照片配额 + 对比开关 + 照片批量额度检查",
             "callback_notifications: 详细执行记录 + 同步/异步重试",
             "public_urls: 静态公开URL访问照片与对比图",
-            "admin_dashboard: 接入方维度统计 + 调用/回调/异常详情"
+            "admin_dashboard: 接入方维度统计 + 调用/回调/异常详情",
+            "default_client: 无Key请求归入默认接入方"
         ]
     }
 

@@ -66,7 +66,8 @@ async def generate_compare(
         patient_no=data.patient_no,
         before_date=before_visit.visit_date.strftime("%Y-%m-%d"),
         after_date=current_visit.visit_date.strftime("%Y-%m-%d"),
-        compare_mode=data.compare_mode
+        compare_mode=data.compare_mode,
+        client_id=client_id or 0
     )
 
     result_filename = Path(result_path).name if result_path else ""

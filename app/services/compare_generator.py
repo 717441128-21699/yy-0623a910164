@@ -89,7 +89,7 @@ class CompareGenerator:
 
     def generate_comparison_grid(self, photo_pairs: List[Dict], patient_no: str,
                                   before_date: str, after_date: str,
-                                  compare_mode: str) -> str:
+                                  compare_mode: str, client_id: int = 0) -> str:
         pair_images = []
         angles = []
 
@@ -153,7 +153,7 @@ class CompareGenerator:
 
             result[y + y_offset:y + y_offset + p_h, x + x_offset:x + x_offset + p_w] = pair_img
 
-        output_filename = f"compare_{patient_no}_{compare_mode}_{before_date}_{after_date}.jpg"
+        output_filename = f"compare_c{client_id}_{patient_no}_{compare_mode}_{before_date}_{after_date}.jpg"
         output_path = self.output_dir / output_filename
 
         imwrite_unicode(str(output_path), result)

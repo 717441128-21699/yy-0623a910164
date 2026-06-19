@@ -1,7 +1,8 @@
 import time
 import json
+import re
 from datetime import datetime
-from typing import Optional
+from typing import Optional, List
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import Response, JSONResponse
@@ -29,12 +30,16 @@ def categorize_api(endpoint: str, method: str) -> str:
         return "system"
 
 
-def get_quota_type_for_endpoint(endpoint: str) -> Optional[str]:
+def get_quota_type_for_endpoint(endpoint: str) -> List[str]:
+    types = []
+    if endpoint.startswith("/api/"):
+        if not (endpoint.startswith("/api/admin") or endpoint.startswith("/api/clients") or endpoint.startswith("/api/callbacks")):
+            types.append("api")
     if endpoint.startswith("/api/compare/generate"):
-        return "compare"
+        types.append("compare")
     if endpoint.startswith("/api/photos/submit"):
-        return "photo"
-    return None
+        types.append("photo")
+    return types
 
 
 class ApiLoggingMiddleware(BaseHTTPMiddleware):
@@ -43,8 +48,11 @@ class ApiLoggingMiddleware(BaseHTTPMiddleware):
         body_bytes = await request.body()
         request_body = ""
         try:
-            if body_bytes and len(body_bytes) < 10000:
-                request_body = body_bytes.decode("utf-8", errors="ignore")
+            if body_bytes:
+                if len(body_bytes) < 10000:
+                    request_body = body_bytes.decode("utf-8", errors="ignore")
+                else:
+                    request_body = body_bytes[:8000].decode("utf-8", errors="ignore")
         except Exception:
             pass
 
@@ -62,21 +70,43 @@ class ApiLoggingMiddleware(BaseHTTPMiddleware):
                     client = None
                     if api_key:
                         client = crud.get_api_client_by_key(db, api_key)
+                    if not client:
+                        client = crud.get_or_create_default_client(db)
                     client_id = client.id if client else None
 
                     category = categorize_api(path, request.method)
                     if category not in ["admin", "system"]:
-                        quota_type = get_quota_type_for_endpoint(path)
-                        if quota_type:
-                            check = crud.check_quota(db, client_id, quota_type)
+                        quota_types = get_quota_type_for_endpoint(path)
+                        for qt in quota_types:
+                            requested_count = 1
+                            if qt == "photo":
+                                try:
+                                    if request_body and request.method in ["POST", "PUT", "PATCH"]:
+                                        try:
+                                            body_json = json.loads(request_body)
+                                            photos_list = body_json.get("photos", [])
+                                            requested_count = len(photos_list) if isinstance(photos_list, list) else 1
+                                        except json.JSONDecodeError:
+                                            count_m = re.search(r'"photos"\s*:\s*\[', request_body)
+                                            if count_m:
+                                                inner = request_body[count_m.end():]
+                                                requested_count = inner.count('"angle"') or inner.count('"image_base64"') or 1
+                                except Exception:
+                                    pass
+                            check = crud.check_quota(db, client_id, qt, requested_count=requested_count)
                             if not check["allowed"]:
                                 duration_ms = int((time.time() - start_time) * 1000)
                                 patient_no = ""
                                 visit_date = None
                                 try:
                                     if request_body and request.method in ["POST", "PUT", "PATCH"]:
-                                        body_json = json.loads(request_body)
-                                        patient_no = body_json.get("patient_no", "")
+                                        try:
+                                            body_json = json.loads(request_body)
+                                            patient_no = body_json.get("patient_no", "")
+                                        except json.JSONDecodeError:
+                                            m = re.search(r'"patient_no"\s*:\s*"([^"]*)"', request_body)
+                                            if m:
+                                                patient_no = m.group(1)
                                 except Exception:
                                     pass
                                 crud.log_api_call(
@@ -100,12 +130,13 @@ class ApiLoggingMiddleware(BaseHTTPMiddleware):
                                         "success": False,
                                         "message": check["message"],
                                         "used": check.get("used", 0),
-                                        "limit": check.get("limit", 0)
+                                        "limit": check.get("limit", 0),
+                                        "requested": check.get("requested", 1)
                                     }
                                 )
                 finally:
                     db.close()
-            except Exception:
+            except Exception as e:
                 pass
 
         response = await call_next(request)
@@ -120,16 +151,23 @@ class ApiLoggingMiddleware(BaseHTTPMiddleware):
                 client = None
                 if api_key:
                     client = crud.get_api_client_by_key(db, api_key)
+                if not client:
+                    client = crud.get_or_create_default_client(db)
 
                 patient_no = ""
                 visit_date = None
                 try:
                     if request_body and request.method in ["POST", "PUT", "PATCH"]:
-                        body_json = json.loads(request_body)
-                        patient_no = body_json.get("patient_no", "")
-                        vd = body_json.get("visit_date") or body_json.get("current_visit_date")
-                        if vd:
-                            visit_date = datetime.fromisoformat(vd).date() if isinstance(vd, str) else vd
+                        try:
+                            body_json = json.loads(request_body)
+                            patient_no = body_json.get("patient_no", "")
+                            vd = body_json.get("visit_date") or body_json.get("current_visit_date")
+                            if vd:
+                                visit_date = datetime.fromisoformat(vd).date() if isinstance(vd, str) else vd
+                        except json.JSONDecodeError:
+                            m = re.search(r'"patient_no"\s*:\s*"([^"]*)"', request_body)
+                            if m:
+                                patient_no = m.group(1)
                 except Exception:
                     pass
 

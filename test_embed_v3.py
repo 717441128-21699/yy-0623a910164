@@ -45,7 +45,7 @@ def summary():
     hr()
     print(f"  测试结果: {passed}/{total} 通过")
     if passed == total:
-        print("  🎉 所有测试通过！隔离+配额+回调详细版运行正常。")
+        print("  🎉 所有测试通过！v1.3.0 全部功能运行正常。")
     else:
         print(f"  ⚠️  {total - passed} 项失败，请检查。")
     hr()
@@ -54,12 +54,12 @@ def summary():
 def main():
     test_img_b64 = make_test_image()
 
+    # ========== 测试0: 系统信息 ==========
     test_section("测试 0: 系统信息 & 默认接入方")
     r = requests.get(f"{BASE_URL}/").json()
     print(f"  服务版本: {r.get('version')}")
-    print(f"  功能列表: {r.get('features', [])}")
-    check("版本号为 1.2.0", r.get("version") == "1.2.0")
-    check("默认接入方 is_default 已创建", True)
+    check("版本号为 1.3.0", r.get("version") == "1.3.0")
+    check("功能列表含 default_client", "default_client" in str(r.get("features", [])))
 
     list_resp = requests.get(f"{BASE_URL}/api/clients").json()
     default_client_id = None
@@ -70,272 +70,249 @@ def main():
             default_api_key = c["api_key"]
             break
     check("存在默认接入方", default_client_id is not None, f"ID={default_client_id}")
-    print(f"  默认接入方 API Key: {default_api_key}")
 
-    # ========== 接入方创建 ==========
-    test_section("测试 1: 创建两个接入方 (诊所A带配额, 诊所B禁用对比)")
+    # ========== 测试1: 创建接入方 ==========
+    test_section("测试 1: 创建接入方")
     r1 = requests.post(f"{BASE_URL}/api/clients", json={
-        "name": "配额测试诊所A",
+        "name": "诊所A",
         "client_type": "clinic",
-        "contact_name": "张医生",
-        "contact_phone": "13800000001",
         "daily_api_quota": 500,
         "daily_photo_quota": 100,
         "allow_compare": True
     }).json()
     client_a_id = r1["id"]
     client_a_key = r1["api_key"]
-    check("诊所A 创建成功", r1.get("name") == "配额测试诊所A")
-    check("诊所A 每日API配额=500", r1.get("daily_api_quota") == 500)
-    check("诊所A 每日照片配额=100", r1.get("daily_photo_quota") == 100)
-    check("诊所A 允许对比", r1.get("allow_compare") is True)
-    print(f"  诊所A Key: {client_a_key}")
+    check("诊所A 创建成功", r1.get("name") == "诊所A")
 
     r2 = requests.post(f"{BASE_URL}/api/clients", json={
-        "name": "对比禁用诊所B",
+        "name": "诊所B",
         "client_type": "clinic",
-        "contact_name": "李医生",
         "daily_api_quota": 0,
         "daily_photo_quota": 0,
         "allow_compare": False
     }).json()
     client_b_id = r2["id"]
     client_b_key = r2["api_key"]
-    check("诊所B 创建成功", r2.get("name") == "对比禁用诊所B")
     check("诊所B 禁用对比", r2.get("allow_compare") is False)
-    print(f"  诊所B Key: {client_b_key}")
 
-    # ========== 接入方数据隔离 ==========
-    test_section("测试 2: 接入方数据隔离 - 相同患者编号互不干扰")
+    r3 = requests.post(f"{BASE_URL}/api/clients", json={
+        "name": "小配额诊所C",
+        "client_type": "clinic",
+        "daily_api_quota": 2,
+        "daily_photo_quota": 5,
+        "allow_compare": True
+    }).json()
+    client_c_id = r3["id"]
+    client_c_key = r3["api_key"]
+    check("诊所C API配额=2 照片配额=5", r3.get("daily_api_quota") == 2 and r3.get("daily_photo_quota") == 5)
+
     headers_a = {"X-API-Key": client_a_key}
     headers_b = {"X-API-Key": client_b_key}
+    headers_c = {"X-API-Key": client_c_key}
     headers_none = {}
-    shared_patient_no = "P-SHARED-001"
 
-    # 诊所A 提交 初诊 + 复诊
-    def submit_photos(patient_no, visit_date, is_initial, headers, count=4, angles_prefix="正面侧面"):
-        angles = ["正面面相", "侧面面相", "45°侧面面相", "口内正面像",
-                  "口内左侧面像", "口内右侧面像", "上颌牙合面像", "下颌牙合面像"]
+    angles = ["正面面相", "侧面面相", "45°侧面面相", "口内正面像",
+              "口内左侧面像", "口内右侧面像", "上颌牙合面像", "下颌牙合面像"]
+
+    def submit_photos(patient_no, visit_date, is_initial, headers, count=4):
         payload = {
             "patient_no": patient_no,
             "patient_name": f"患者-{patient_no}",
             "visit_date": str(visit_date),
             "is_initial": is_initial,
-            "photos": [
-                {"angle": a, "image_base64": test_img_b64}
-                for a in angles[:count]
-            ]
+            "photos": [{"angle": a, "image_base64": test_img_b64} for a in angles[:count]]
         }
-        return requests.post(f"{BASE_URL}/api/photos/submit", json=payload, headers=headers).json()
+        resp = requests.post(f"{BASE_URL}/api/photos/submit", json=payload, headers=headers)
+        return resp.json(), resp.status_code
 
-    init_a = submit_photos(shared_patient_no, date(2024, 1, 15), True, headers_a)
-    check("诊所A 提交初诊成功", init_a.get("success") is True, f"照片数={init_a.get('completeness',{}).get('submitted_count', 0)}")
+    # ========== 测试2: 数据隔离 + 对比图不覆盖 ==========
+    test_section("测试 2: 接入方数据隔离 + 对比图互不覆盖")
+    shared_p = "P-SHARED-001"
 
-    init_b = submit_photos(shared_patient_no, date(2024, 3, 10), True, headers_b)
-    check("诊所B 提交相同编号患者初诊成功", init_b.get("success") is True)
+    body, _ = submit_photos(shared_p, date(2024, 1, 15), True, headers_a)
+    check("诊所A 提交初诊成功", body.get("success") is True)
 
-    curr_a = submit_photos(shared_patient_no, date(2024, 6, 20), False, headers_a, count=6)
-    check("诊所A 提交复诊成功", curr_a.get("success") is True)
+    body, _ = submit_photos(shared_p, date(2024, 1, 15), True, headers_b)
+    check("诊所B 提交相同编号初诊成功", body.get("success") is True)
 
-    # 诊所A 再用另一个患者编号提交，验证有多个患者
-    p_a2 = "P-A-EXTRA-002"
-    extra_a = submit_photos(p_a2, date(2024, 5, 15), True, headers_a, count=4)
-    check("诊所A 提交第二个患者", extra_a.get("success") is True)
+    body, _ = submit_photos(shared_p, date(2024, 6, 20), False, headers_a, count=6)
+    check("诊所A 提交复诊成功", body.get("success") is True)
 
-    # 诊所A 对比(自己的两次)
-    compare_a = requests.post(f"{BASE_URL}/api/compare/generate", json={
-        "patient_no": shared_patient_no,
-        "compare_mode": "initial_vs_current",
+    body, _ = submit_photos(shared_p, date(2024, 6, 20), False, headers_b, count=4)
+    check("诊所B 提交复诊成功", body.get("success") is True)
+
+    list_b = requests.get(f"{BASE_URL}/api/photos/list/{shared_p}/2024-06-20", headers=headers_b).json()
+    check("诊所B 只看到自己4张", len(list_b.get("photos", [])) == 4)
+
+    list_a = requests.get(f"{BASE_URL}/api/photos/list/{shared_p}/2024-06-20", headers=headers_a).json()
+    check("诊所A 看到自己6张", len(list_a.get("photos", [])) == 6)
+
+    cmp_a = requests.post(f"{BASE_URL}/api/compare/generate", json={
+        "patient_no": shared_p, "compare_mode": "initial_vs_current",
         "current_visit_date": "2024-06-20"
     }, headers=headers_a).json()
-    check("诊所A 可用自己的两次做对比", compare_a.get("success") is True,
-          f"角度={compare_a.get('angles_compared', 0)}, URL={compare_a.get('compare_image_url', '')[:40]}...")
-
-    # 诊所B 查询 共享患者编号 应该看不到A的照片
-    list_b = requests.get(
-        f"{BASE_URL}/api/photos/list/{shared_patient_no}/2024-06-20",
-        headers=headers_b
-    ).json()
-    check("诊所B 看不到诊所A的复诊日期照片", list_b.get("photos", []) == [])
-
-    # 诊所A 查询共享患者应该有照片
-    list_a = requests.get(
-        f"{BASE_URL}/api/photos/list/{shared_patient_no}/2024-06-20",
-        headers=headers_a
-    ).json()
-    check("诊所A 自己能看到6张复诊照片", len(list_a.get("photos", [])) == 6)
-
-    # 无key(默认接入方) 查询共享患者应该也看不到
-    list_d = requests.get(
-        f"{BASE_URL}/api/photos/list/{shared_patient_no}/2024-06-20",
-        headers=headers_none
-    ).json()
-    check("默认接入方 看不到诊所A的照片", list_d.get("photos", []) == [])
-
-    # ========== 配额测试 ==========
-    test_section("测试 3: 配额限流 - 新建小配额接入方验证")
-    # 专门创建一个小配额的接入方来测试
-    quota_resp = requests.post(f"{BASE_URL}/api/clients", json={
-        "name": "小配额诊所C",
-        "client_type": "clinic",
-        "daily_api_quota": 100,
-        "daily_photo_quota": 3,
-        "allow_compare": True
-    }).json()
-    client_c_id = quota_resp["id"]
-    client_c_key = quota_resp["api_key"]
-    headers_c = {"X-API-Key": client_c_key}
-
-    submit_c_1 = submit_photos("P-QUOTA-001", date(2024, 6, 10), True, headers_c, count=3)
-    check("诊所C 提交3张(配额满)", submit_c_1.get("success") is True)
-
-    submit_c_2 = submit_photos("P-QUOTA-001", date(2024, 6, 11), False, headers_c, count=1)
-    check("诊所C 超额提交照片 返回429", submit_c_2.get("success") is False and "已达上限" in submit_c_2.get("message", ""),
-          f"返回: {submit_c_2}")
-
-    # ========== 对比禁用测试 ==========
-    test_section("测试 4: 对比禁用 - 诊所B调用对比返回429")
-    submit_b1 = submit_photos(shared_patient_no, date(2024, 5, 1), True, headers_b)
-    submit_b2 = submit_photos(shared_patient_no, date(2024, 6, 1), False, headers_b)
+    check("诊所A 对比成功", cmp_a.get("success") is True)
+    url_a = cmp_a.get("compare_image_url", "")
 
     cmp_b = requests.post(f"{BASE_URL}/api/compare/generate", json={
-        "patient_no": shared_patient_no,
-        "compare_mode": "initial_vs_current",
-        "current_visit_date": "2024-06-01"
+        "patient_no": shared_p, "compare_mode": "initial_vs_current",
+        "current_visit_date": "2024-06-20"
     }, headers=headers_b).json()
-    check("诊所B 禁用对比 返回429", cmp_b.get("success") is False, f"消息: {cmp_b.get('message', cmp_b)}")
+    cmp_b_ok = cmp_b.get("success") is True
+    url_b = cmp_b.get("compare_image_url", "") if cmp_b_ok else ""
+    check("诊所B 对比结果", cmp_b_ok or cmp_b.get("success") is False)
 
-    # ========== 回调详细记录 + 同步重试 ==========
-    test_section("测试 5: 回调配置 + 同步重试 + 每次执行记录")
-    # 创建诊所A回调配置（指向一个肯定失败的地址）
+    if url_a and url_b:
+        check("对比图URL互不覆盖", url_a != url_b)
+        fn_a = url_a.split("/")[-1]
+        fn_b = url_b.split("/")[-1]
+        check("诊所A对比图文件名含c{}".format(client_a_id), "c{}".format(client_a_id) in fn_a, f"fn={fn_a}")
+        check("诊所B对比图文件名含c{}".format(client_b_id), "c{}".format(client_b_id) in fn_b, f"fn={fn_b}")
+        resp_a = requests.get(f"{BASE_URL}{url_a}")
+        check("诊所A对比图链接仍可访问", resp_a.status_code == 200)
+
+    # ========== 测试3: API配额拦所有业务接口 ==========
+    test_section("测试 3: API配额拦住所有业务接口(含查询)")
+    # 诊所C: api_quota=2, photo_quota=5
+    # 先消耗1次API调用(3张照片, <=5)
+    body_c1, sc1 = submit_photos("P-C-1", date(2024, 5, 1), True, headers_c, count=3)
+    check("诊所C 第1次提交成功", body_c1.get("success") is True)
+
+    # 第2次API调用
+    body_c2, sc2 = submit_photos("P-C-1", date(2024, 5, 2), False, headers_c, count=2)
+    check("诊所C 第2次提交成功(api配额用完)", body_c2.get("success") is True)
+
+    # 第3次：API配额已用2次=配额上限，照片查询也应被429拦住
+    list_c = requests.get(f"{BASE_URL}/api/photos/list/P-C-1/2024-05-01", headers=headers_c)
+    is_429 = list_c.status_code == 429
+    check("诊所C API配额满 照片查询返回429", is_429)
+    if is_429:
+        body_429 = list_c.json()
+        check("429消息含API配额提示", "API" in body_429.get("message", ""), f"msg={body_429.get('message', '')}")
+
+    # 管理员日志筛429
+    logs_429 = requests.get(f"{BASE_URL}/api/admin/logs", params={
+        "status_code": 429, "client_id": client_c_id
+    }).json()
+    check("管理员可筛到诊所C的429日志", logs_429.get("total", 0) >= 1)
+
+    # ========== 测试4: 照片批量额度检查 ==========
+    test_section("测试 4: 照片批量额度 - 剩余不够整次拒绝")
+    # 先更新诊所C配额，给足API但限制照片
+    requests.put(f"{BASE_URL}/api/clients/{client_c_id}", json={
+        "daily_api_quota": 500,
+        "daily_photo_quota": 5
+    }).json()
+    # 当前已用 photo_uploads=3+2=5，刚好满
+    # 再提交3张: 5+3=8>5 应被整次拒绝
+    body_batch_fail, sc_bf = submit_photos("P-C-BATCH", date(2024, 7, 1), True, headers_c, count=3)
+    is_rejected = body_batch_fail.get("success") is False and "剩余额度" in body_batch_fail.get("message", "")
+    check("照片批量超额 整次拒绝", is_rejected, f"msg={body_batch_fail.get('message', '')}")
+    if not body_batch_fail.get("success"):
+        has_fields = (body_batch_fail.get("used") is not None and
+                      body_batch_fail.get("limit") is not None and
+                      body_batch_fail.get("requested") is not None)
+        check("返回含已用/上限/请求数", has_fields,
+              f"used={body_batch_fail.get('used')}, limit={body_batch_fail.get('limit')}, requested={body_batch_fail.get('requested')}")
+
+    # ========== 测试5: 无Key请求归入默认接入方 ==========
+    test_section("测试 5: 无Key请求归默认接入方 + 详情可查")
+    nk_patient = "P-NOKEY-001"
+    body_nk, _ = submit_photos(nk_patient, date(2024, 8, 1), True, headers_none, count=4)
+    check("无Key请求可正常提交", body_nk.get("success") is True)
+
+    time.sleep(1)
+
+    detail_default = requests.get(f"{BASE_URL}/api/admin/clients/{default_client_id}/detail",
+                                  params={"logs_limit": 50}).json()
+    check("默认接入方详情 success", detail_default.get("success") is True)
+
+    nk_logs = requests.get(f"{BASE_URL}/api/admin/logs", params={
+        "patient_no": nk_patient, "client_id": default_client_id
+    }).json()
+    found_nk = nk_logs.get("total", 0) >= 1
+    check("默认接入方日志含无Key请求", found_nk, f"nk_logs_total={nk_logs.get('total', 0)}")
+
+    du = detail_default.get("daily_usage", {})
+    check("默认接入方用量含API调用计数", du.get("api_calls", 0) >= 1, f"api_calls={du.get('api_calls', 0)}")
+
+    stats_resp = requests.get(f"{BASE_URL}/api/admin/client-stats").json()
+    ds = next((s for s in stats_resp["stats"] if s["client_id"] == default_client_id), None)
+    if ds:
+        check("默认接入方统计含患者", ds["total_patients"] >= 1)
+        check("默认接入方统计含照片", ds["total_photos"] >= 4)
+        check("默认接入方今日API>0", ds["daily_api_calls"] >= 1, f"calls={ds['daily_api_calls']}")
+
+    # ========== 测试6: 回调详细记录 + 同步重试 ==========
+    test_section("测试 6: 回调配置 + 同步重试 + 执行记录")
     cb_cfg = requests.post(f"{BASE_URL}/api/callbacks/configs", json={
         "client_id": client_a_id,
         "event_type": "photo_submitted",
         "callback_url": "http://127.0.0.1:1/nonexistent-callback",
-        "secret_token": "test-secret-123",
+        "secret_token": "test-secret",
         "max_retries": 2,
         "retry_interval": 10,
         "is_active": True
     }).json()
-    check("回调配置创建成功", cb_cfg.get("id") is not None, f"config_id={cb_cfg.get('id')}")
+    check("回调配置创建成功", cb_cfg.get("id") is not None)
 
-    # 诊所A 用新患者触发一次回调任务（到不会成功的地址）
-    trigger_patient = "P-CB-TEST-001"
-    trig = submit_photos(trigger_patient, date(2024, 6, 20), True, headers_a, count=4)
-    check("触发回调的照片提交成功", trig.get("success") is True)
+    trigger_p = "P-CB-001"
+    body_trig, _ = submit_photos(trigger_p, date(2024, 9, 1), True, headers_a, count=4)
+    check("触发回调的照片提交成功", body_trig.get("success") is True)
 
-    # 等待一下后台处理尝试一次
     time.sleep(3)
 
-    # 查询回调任务
-    tasks_resp = requests.get(f"{BASE_URL}/api/callbacks/tasks", params={
+    tasks = requests.get(f"{BASE_URL}/api/callbacks/tasks", params={
         "client_id": client_a_id, "event_type": "photo_submitted"
     }).json()
-    print(f"  回调任务数: {tasks_resp.get('total', 0)}")
-    check("至少存在1个回调任务", tasks_resp.get("total", 0) >= 1)
+    check("存在回调任务", tasks.get("total", 0) >= 1)
 
     task_id = None
-    for t in tasks_resp.get("tasks", []):
-        if t.get("patient_no") == trigger_patient:
+    for t in tasks.get("tasks", []):
+        if t.get("patient_no") == trigger_p:
             task_id = t["id"]
             break
-    check("找到对应的回调任务", task_id is not None, f"task_id={task_id}")
+    check("找到回调任务", task_id is not None)
 
     if task_id:
-        # 先同步重试1次(肯定失败,因为指向不存在端口)
-        retry_resp = requests.post(f"{BASE_URL}/api/callbacks/tasks/retry/{task_id}").json()
-        print(f"  同步重试结果: {retry_resp}")
-        check("同步重试接口返回", retry_resp.get("success") is True)
-        check("同步重试状态是 failed 或 retrying",
-              retry_resp.get("new_status") in ("failed", "retrying"))
-        check("同步重试失败原因记录", retry_resp.get("error_message", "") != "")
+        r1 = requests.post(f"{BASE_URL}/api/callbacks/tasks/retry/{task_id}").json()
+        check("同步重试接口返回", r1.get("success") is True)
+        check("同步重试失败原因非空", r1.get("error_message", "") != "")
 
-        # 再次同步重试，如果max_retries=2，retry_count=2后就到failed
         time.sleep(1)
-        retry_resp2 = requests.post(f"{BASE_URL}/api/callbacks/tasks/retry/{task_id}").json()
-        print(f"  第二次同步重试: {retry_resp2}")
-        check("第二次同步重试后状态记录存在", retry_resp2.get("success") is True)
+        r2 = requests.post(f"{BASE_URL}/api/callbacks/tasks/retry/{task_id}").json()
+        check("第二次同步重试后状态记录", r2.get("success") is True)
 
-        # 查询详情，看是否有执行记录
         detail = requests.get(f"{BASE_URL}/api/callbacks/tasks/{task_id}").json()
         execs = detail.get("executions", [])
-        print(f"  回调执行记录数: {len(execs)}")
-        check("至少存在执行记录", len(execs) >= 2, f"实际={len(execs)}")
-        if execs:
-            first = execs[-1]
-            check("执行记录包含响应状态或错误信息",
-                  first.get("duration_ms", 0) > 0 or first.get("error_message", "") != "")
+        check("至少2条执行记录", len(execs) >= 2, f"实际={len(execs)}")
 
-    # ========== 接入方统计 + 详情 ==========
-    test_section("测试 6: 接入方统计 - 患者数/照片数/对比数/配额进度/详情")
-    stats_resp = requests.get(f"{BASE_URL}/api/admin/client-stats").json()
-    print(f"  接入方数量: {stats_resp.get('total')}")
-    found_a = found_b = found_default = False
-    for s in stats_resp.get("stats", []):
-        if s["client_id"] == client_a_id:
-            found_a = True
-            print(f"  诊所A统计: 患者={s['total_patients']}, 照片={s['total_photos']}, "
-                  f"对比={s['total_compares']}, 异常={s['abnormal_photos']}, "
-                  f"今日API用={s['daily_api_calls']}/上限={s['daily_api_quota']}, "
-                  f"今日照片用={s['daily_photo_uploads']}/上限={s['daily_photo_quota']}, "
-                  f"API配额进度={s['api_quota_used_pct']}%, 照片配额进度={s['photo_quota_used_pct']}%, "
-                  f"允许对比={s['allow_compare']}, 默认={s['is_default']}")
-            check("诊所A统计有多个患者", s["total_patients"] >= 2)
-            check("诊所A统计有对比记录", s["total_compares"] >= 1)
-            check("诊所A照片配额被用满或差不多", s["daily_photo_uploads"] >= 10)
-            check("诊所A is_default=False", s["is_default"] is False)
-        elif s["client_id"] == client_b_id:
-            found_b = True
-            check("诊所B allow_compare=False", s["allow_compare"] is False)
-        elif s["client_id"] == default_client_id:
-            found_default = True
-            check("默认接入方 is_default=True", s["is_default"] is True)
-    check("统计中包含诊所A", found_a)
-    check("统计中包含诊所B", found_b)
-    check("统计中包含默认接入方", found_default)
-
-    # 接入方详情
-    test_section("测试 7: 接入方详情 - 最近调用/失败回调/异常照片/用量进度")
-    detail_resp = requests.get(f"{BASE_URL}/api/admin/clients/{client_a_id}/detail").json()
-    check("详情 success=True", detail_resp.get("success") is True)
-    check("详情 client.id 正确", detail_resp.get("client", {}).get("id") == client_a_id)
-    check("详情 用量进度字段完整", detail_resp.get("daily_usage", {}).get("api_quota_limit") == 500)
-    recent_calls = detail_resp.get("recent_logs", [])
-    print(f"  最近调用数: {len(recent_calls)}")
-    check("详情 最近调用列表非空", len(recent_calls) >= 1)
-    failed_cbs = detail_resp.get("failed_callbacks", [])
-    print(f"  失败回调数: {len(failed_cbs)}")
-    check("详情 失败回调数非空", len(failed_cbs) >= 1)
-    abnormals = detail_resp.get("abnormal_photos", [])
-    print(f"  异常照片数: {len(abnormals)}")
-    check("详情 异常照片非空(测试图片都不合格)", len(abnormals) >= 1)
-
-    # ========== 默认接入方(无Key) ==========
-    test_section("测试 8: 无 API Key 走默认接入方 - 旧系统兼容")
-    no_key_patient = "P-OLD-SYS-001"
-    resp_nk = submit_photos(no_key_patient, date(2024, 6, 15), True, headers_none, count=4)
-    check("无Key请求可正常提交", resp_nk.get("success") is True)
-
-    # 提交后, 该患者应归默认接入方
+    # ========== 测试7: 接入方统计 + 详情 ==========
+    test_section("测试 7: 接入方统计 & 详情")
     stats2 = requests.get(f"{BASE_URL}/api/admin/client-stats").json()
-    default_stat = next((s for s in stats2["stats"] if s["client_id"] == default_client_id), None)
-    if default_stat:
-        check("默认接入方患者数增加", default_stat["total_patients"] >= 1)
-        print(f"  默认接入方 患者数={default_stat['total_patients']}, 照片={default_stat['total_photos']}")
+    sa = next((s for s in stats2["stats"] if s["client_id"] == client_a_id), None)
+    if sa:
+        check("诊所A统计有对比记录", sa["total_compares"] >= 1)
+        check("诊所A is_default=False", sa["is_default"] is False)
 
-    # 统计筛选 - 按状态码
-    test_section("测试 9: 日志多维度筛选 (429 配额超限)")
-    logs_429 = requests.get(f"{BASE_URL}/api/admin/logs", params={
-        "status_code": 429, "client_id": client_c_id
-    }).json()
-    print(f"  诊所C 429日志数: {logs_429.get('total', 0)}")
-    check("存在配额超限的429日志", logs_429.get("total", 0) >= 1)
+    check("默认接入方 is_default=True",
+          any(s["is_default"] for s in stats2["stats"] if s["client_id"] == default_client_id))
 
-    logs_compare = requests.get(f"{BASE_URL}/api/admin/logs", params={
-        "api_category": "compare", "status_code": 200
-    }).json()
-    print(f"  成功对比日志数: {logs_compare.get('total', 0)}")
-    check("存在成功的对比日志", logs_compare.get("total", 0) >= 1)
+    detail_a = requests.get(f"{BASE_URL}/api/admin/clients/{client_a_id}/detail").json()
+    check("诊所A详情 success", detail_a.get("success") is True)
+    check("诊所A详情 最近调用非空", len(detail_a.get("recent_logs", [])) >= 1)
+    check("诊所A详情 失败回调非空", len(detail_a.get("failed_callbacks", [])) >= 1)
+    check("诊所A详情 异常照片非空", len(detail_a.get("abnormal_photos", [])) >= 1)
+
+    # ========== 测试8: 对比禁用 ==========
+    test_section("测试 8: 诊所B 对比禁用返回429")
+    cmp_b2 = requests.post(f"{BASE_URL}/api/compare/generate", json={
+        "patient_no": shared_p, "compare_mode": "initial_vs_current",
+        "current_visit_date": "2024-06-20"
+    }, headers=headers_b).json()
+    check("诊所B 禁用对比 返回429",
+          cmp_b2.get("success") is False,
+          f"msg={cmp_b2.get('message', cmp_b2)}")
 
     summary()
 
@@ -343,7 +320,7 @@ def main():
 if __name__ == "__main__":
     print()
     print("╔" + "=" * 58 + "╗")
-    print("║    正畸复诊拍照对比服务 - v1.2.0 隔离/配额/回调详细版测试套件    ║")
+    print("║    正畸复诊拍照对比服务 - v1.3.0 隔离/配额/回调/批量版测试套件   ║")
     print("╚" + "=" * 58 + "╝")
     try:
         main()

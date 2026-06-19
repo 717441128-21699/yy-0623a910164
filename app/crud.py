@@ -436,7 +436,8 @@ def get_daily_usage(db: Session, client_id: Optional[int], usage_date: Optional[
     return query.first()
 
 
-def check_quota(db: Session, client_id: Optional[int], quota_type: str = "api") -> Dict[str, Any]:
+def check_quota(db: Session, client_id: Optional[int], quota_type: str = "api",
+                requested_count: int = 1) -> Dict[str, Any]:
     client = None
     if client_id is not None:
         client = get_api_client(db, client_id)
@@ -450,6 +451,7 @@ def check_quota(db: Session, client_id: Optional[int], quota_type: str = "api") 
         "allowed": True,
         "used": 0,
         "limit": 0,
+        "requested": requested_count,
         "message": ""
     }
 
@@ -462,9 +464,10 @@ def check_quota(db: Session, client_id: Optional[int], quota_type: str = "api") 
     elif quota_type == "photo":
         quota = client.daily_photo_quota if client else 0
         used = usage.photo_uploads
-        if quota and used >= quota:
+        if quota and used + requested_count > quota:
+            remaining = max(0, quota - used)
             result["allowed"] = False
-            result["message"] = f"今日照片上传已达上限({quota})张，请明日再试或联系管理员升级配额"
+            result["message"] = f"今日照片上传已达上限({quota})张，剩余额度({remaining})张不足本次提交({requested_count})张"
     elif quota_type == "compare":
         allow = client.allow_compare if client else True
         if not allow:

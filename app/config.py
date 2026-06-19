@@ -4,7 +4,7 @@ from pathlib import Path
 
 class Settings(BaseSettings):
     app_name: str = "正畸复诊拍照对比服务"
-    app_version: str = "1.2.0"
+    app_version: str = "1.3.0"
 
     database_url: str = "sqlite:///./data/ortho_service.db"
 
