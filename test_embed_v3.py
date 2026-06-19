@@ -314,6 +314,81 @@ def main():
           cmp_b2.get("success") is False,
           f"msg={cmp_b2.get('message', cmp_b2)}")
 
+    # ========== 测试9: 大照片配额准确性 ==========
+    test_section("测试 9: 大尺寸照片配额 - 按真实数量计算")
+
+    big_img_b64 = make_test_image(width=1600, height=1200, color=(180, 160, 140))
+    big_img_len_kb = len(big_img_b64) / 1024
+    print(f"  单张大照片 base64 大小: {big_img_len_kb:.1f} KB")
+
+    r_d = requests.post(f"{BASE_URL}/api/clients", json={
+        "name": "大照片测试诊所D",
+        "client_type": "clinic",
+        "daily_api_quota": 500,
+        "daily_photo_quota": 5,
+        "allow_compare": True
+    }).json()
+    client_d_id = r_d["id"]
+    client_d_key = r_d["api_key"]
+    headers_d = {"X-API-Key": client_d_key}
+    check("诊所D 创建成功 photo_quota=5", r_d.get("daily_photo_quota") == 5)
+
+    def submit_big_photos(patient_no, visit_date, is_initial, headers, count=4):
+        payload = {
+            "patient_no": patient_no,
+            "patient_name": f"大照片-{patient_no}",
+            "visit_date": str(visit_date),
+            "is_initial": is_initial,
+            "photos": [{"angle": angles[i % len(angles)], "image_base64": big_img_b64} for i in range(count)]
+        }
+        resp = requests.post(f"{BASE_URL}/api/photos/submit", json=payload, headers=headers)
+        return resp.json(), resp.status_code
+
+    big_p = "P-BIGPHOTO-001"
+    body_d1, sc_d1 = submit_big_photos(big_p, date(2024, 10, 1), True, headers_d, count=3)
+    check("诊所D 第1次大照片提交(3张)成功", body_d1.get("success") is True,
+          f"status={sc_d1}")
+
+    list_after_1 = requests.get(f"{BASE_URL}/api/photos/list/{big_p}/2024-10-01", headers=headers_d).json()
+    check("提交后照片列表有3张", len(list_after_1.get("photos", [])) == 3)
+
+    body_d2, sc_d2 = submit_big_photos("P-BIGPHOTO-002", date(2024, 10, 2), False, headers_d, count=2)
+    check("诊所D 第2次大照片提交(2张)成功(总5张)", body_d2.get("success") is True)
+
+    detail_d = requests.get(f"{BASE_URL}/api/admin/clients/{client_d_id}/detail").json()
+    du_d = detail_d.get("daily_usage", {})
+    check("用量显示已用5张照片", du_d.get("photo_uploads", 0) == 5,
+          f"photo_uploads={du_d.get('photo_uploads', 0)}")
+
+    body_big_fail, sc_bf = submit_big_photos("P-BIGPHOTO-003", date(2024, 10, 3), True, headers_d, count=4)
+    is_bf_reject = body_big_fail.get("success") is False and sc_bf == 429
+    check("大照片超配额 整次返回429", is_bf_reject,
+          f"status={sc_bf}, msg={body_big_fail.get('message', '')}")
+
+    if not body_big_fail.get("success"):
+        check("返回含真实requested=4", body_big_fail.get("requested") == 4,
+              f"requested={body_big_fail.get('requested')}")
+        check("返回含used=5", body_big_fail.get("used") == 5,
+              f"used={body_big_fail.get('used')}")
+        check("返回含limit=5", body_big_fail.get("limit") == 5,
+              f"limit={body_big_fail.get('limit')}")
+        check("消息含剩余额度和本次提交", "剩余额度" in body_big_fail.get("message", "") and
+              "本次提交" in body_big_fail.get("message", ""))
+
+    list_after_fail = requests.get(f"{BASE_URL}/api/photos/list/P-BIGPHOTO-003/2024-10-03", headers=headers_d).json()
+    check("超额后该患者无照片(整次未保存)", len(list_after_fail.get("photos", [])) == 0)
+
+    logs_bf = requests.get(f"{BASE_URL}/api/admin/logs", params={
+        "patient_no": "P-BIGPHOTO-003", "client_id": client_d_id
+    }).json()
+    check("管理员可按患者+接入方筛到429日志", logs_bf.get("total", 0) >= 1,
+          f"total={logs_bf.get('total', 0)}")
+
+    if logs_bf.get("total", 0) > 0:
+        log_item = logs_bf["logs"][0]
+        check("失败日志patient_no正确", log_item.get("patient_no") == "P-BIGPHOTO-003")
+        check("失败日志status_code=429", log_item.get("status_code") == 429)
+
     summary()
 
 

@@ -42,19 +42,51 @@ def get_quota_type_for_endpoint(endpoint: str) -> List[str]:
     return types
 
 
+def parse_body_fields(body_bytes: bytes) -> dict:
+    result = {"patient_no": "", "visit_date": None, "photo_count": 0}
+    if not body_bytes:
+        return result
+    try:
+        body_str = body_bytes.decode("utf-8", errors="ignore")
+        try:
+            body_json = json.loads(body_str)
+            result["patient_no"] = body_json.get("patient_no", "") or ""
+            vd = body_json.get("visit_date") or body_json.get("current_visit_date")
+            if vd and isinstance(vd, str):
+                try:
+                    result["visit_date"] = datetime.fromisoformat(vd).date()
+                except Exception:
+                    pass
+            photos = body_json.get("photos", [])
+            if isinstance(photos, list):
+                result["photo_count"] = len(photos)
+        except json.JSONDecodeError:
+            m = re.search(r'"patient_no"\s*:\s*"([^"]*)"', body_str)
+            if m:
+                result["patient_no"] = m.group(1)
+            angle_count = body_str.count('"angle"')
+            if angle_count > 0:
+                result["photo_count"] = angle_count
+    except Exception:
+        pass
+    return result
+
+
 class ApiLoggingMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
         start_time = time.time()
         body_bytes = await request.body()
-        request_body = ""
+        request_body_log = ""
         try:
             if body_bytes:
                 if len(body_bytes) < 10000:
-                    request_body = body_bytes.decode("utf-8", errors="ignore")
+                    request_body_log = body_bytes.decode("utf-8", errors="ignore")
                 else:
-                    request_body = body_bytes[:8000].decode("utf-8", errors="ignore")
+                    request_body_log = body_bytes[:8000].decode("utf-8", errors="ignore")
         except Exception:
             pass
+
+        parsed_fields = parse_body_fields(body_bytes)
 
         async def receive():
             return {"type": "http.request", "body": body_bytes, "more_body": False}
@@ -80,35 +112,13 @@ class ApiLoggingMiddleware(BaseHTTPMiddleware):
                         for qt in quota_types:
                             requested_count = 1
                             if qt == "photo":
-                                try:
-                                    if request_body and request.method in ["POST", "PUT", "PATCH"]:
-                                        try:
-                                            body_json = json.loads(request_body)
-                                            photos_list = body_json.get("photos", [])
-                                            requested_count = len(photos_list) if isinstance(photos_list, list) else 1
-                                        except json.JSONDecodeError:
-                                            count_m = re.search(r'"photos"\s*:\s*\[', request_body)
-                                            if count_m:
-                                                inner = request_body[count_m.end():]
-                                                requested_count = inner.count('"angle"') or inner.count('"image_base64"') or 1
-                                except Exception:
-                                    pass
+                                pc = parsed_fields.get("photo_count", 0)
+                                requested_count = pc if pc > 0 else 1
                             check = crud.check_quota(db, client_id, qt, requested_count=requested_count)
                             if not check["allowed"]:
                                 duration_ms = int((time.time() - start_time) * 1000)
-                                patient_no = ""
-                                visit_date = None
-                                try:
-                                    if request_body and request.method in ["POST", "PUT", "PATCH"]:
-                                        try:
-                                            body_json = json.loads(request_body)
-                                            patient_no = body_json.get("patient_no", "")
-                                        except json.JSONDecodeError:
-                                            m = re.search(r'"patient_no"\s*:\s*"([^"]*)"', request_body)
-                                            if m:
-                                                patient_no = m.group(1)
-                                except Exception:
-                                    pass
+                                patient_no = parsed_fields.get("patient_no", "")
+                                visit_date = parsed_fields.get("visit_date")
                                 crud.log_api_call(
                                     db=db,
                                     endpoint=path,
@@ -117,7 +127,7 @@ class ApiLoggingMiddleware(BaseHTTPMiddleware):
                                     visit_date=visit_date,
                                     status_code=429,
                                     duration_ms=duration_ms,
-                                    request_body=request_body[:2000] if len(request_body) > 2000 else request_body,
+                                    request_body=request_body_log[:2000] if len(request_body_log) > 2000 else request_body_log,
                                     error_message=check["message"],
                                     client_ip=request.client.host if request.client else "",
                                     user_agent=request.headers.get("user-agent", "")[:500],
@@ -154,22 +164,8 @@ class ApiLoggingMiddleware(BaseHTTPMiddleware):
                 if not client:
                     client = crud.get_or_create_default_client(db)
 
-                patient_no = ""
-                visit_date = None
-                try:
-                    if request_body and request.method in ["POST", "PUT", "PATCH"]:
-                        try:
-                            body_json = json.loads(request_body)
-                            patient_no = body_json.get("patient_no", "")
-                            vd = body_json.get("visit_date") or body_json.get("current_visit_date")
-                            if vd:
-                                visit_date = datetime.fromisoformat(vd).date() if isinstance(vd, str) else vd
-                        except json.JSONDecodeError:
-                            m = re.search(r'"patient_no"\s*:\s*"([^"]*)"', request_body)
-                            if m:
-                                patient_no = m.group(1)
-                except Exception:
-                    pass
+                patient_no = parsed_fields.get("patient_no", "")
+                visit_date = parsed_fields.get("visit_date")
 
                 crud.log_api_call(
                     db=db,
@@ -179,7 +175,7 @@ class ApiLoggingMiddleware(BaseHTTPMiddleware):
                     visit_date=visit_date,
                     status_code=status_code,
                     duration_ms=duration_ms,
-                    request_body=request_body[:2000] if len(request_body) > 2000 else request_body,
+                    request_body=request_body_log[:2000] if len(request_body_log) > 2000 else request_body_log,
                     error_message="",
                     client_ip=request.client.host if request.client else "",
                     user_agent=request.headers.get("user-agent", "")[:500],
