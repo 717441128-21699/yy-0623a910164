@@ -22,31 +22,28 @@ async def generate_compare(
 ):
     client_id = current_client.id if current_client else None
 
-    patient = db.query(models.Patient).filter(
-        models.Patient.patient_no == data.patient_no
-    ).first()
-
+    patient = crud.get_patient(db, data.patient_no, client_id)
     if not patient:
         raise HTTPException(status_code=404, detail="患者不存在")
 
-    current_visit = crud.get_visit_by_date(db, patient.id, data.current_visit_date)
+    current_visit = crud.get_visit_by_date(db, patient.id, data.current_visit_date, client_id)
     if not current_visit:
         raise HTTPException(status_code=404, detail="本次复诊记录不存在")
 
     before_visit = None
     if data.compare_mode == "initial_vs_current":
-        before_visit = crud.get_initial_visit(db, patient.id)
+        before_visit = crud.get_initial_visit(db, patient.id, client_id)
         if not before_visit:
             raise HTTPException(status_code=404, detail="未找到初诊记录")
     elif data.compare_mode == "last_vs_current":
-        before_visit = crud.get_previous_visit(db, patient.id, data.current_visit_date)
+        before_visit = crud.get_previous_visit(db, patient.id, data.current_visit_date, client_id)
         if not before_visit:
             raise HTTPException(status_code=404, detail="未找到上次复诊记录")
     else:
         raise HTTPException(status_code=400, detail="无效的对比模式")
 
-    before_photos = crud.get_photos_by_visit(db, before_visit.id)
-    after_photos = crud.get_photos_by_visit(db, current_visit.id)
+    before_photos = crud.get_photos_by_visit(db, before_visit.id, client_id)
+    after_photos = crud.get_photos_by_visit(db, current_visit.id, client_id)
 
     before_photo_map = {p.angle: p for p in before_photos}
     after_photo_map = {p.angle: p for p in after_photos}

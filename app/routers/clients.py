@@ -16,7 +16,7 @@ async def create_client(data: schemas.ApiClientCreate, db: Session = Depends(get
     return info
 
 
-@router.get("", response_model=schemas.ApiClientListResponse, summary="获取接入方列表")
+@router.get("", response_model=schemas.ApiClientListResponse, summary="获取接入方列表(含统计)")
 async def list_clients(
     skip: int = Query(0, ge=0),
     limit: int = Query(50, ge=1, le=200),
@@ -37,7 +37,7 @@ async def list_clients(
     return schemas.ApiClientListResponse(success=True, total=total, clients=result)
 
 
-@router.get("/{client_id}", response_model=schemas.ApiClientInfo, summary="获取接入方详情")
+@router.get("/{client_id}", response_model=schemas.ApiClientInfo, summary="获取接入方详情(简单版)")
 async def get_client(client_id: int, db: Session = Depends(get_db)):
     client = crud.get_api_client(db, client_id)
     if not client:
@@ -49,7 +49,7 @@ async def get_client(client_id: int, db: Session = Depends(get_db)):
     return info
 
 
-@router.put("/{client_id}", response_model=schemas.ApiClientInfo, summary="更新接入方信息")
+@router.put("/{client_id}", response_model=schemas.ApiClientInfo, summary="更新接入方信息(含配额和对比权限)")
 async def update_client(client_id: int, data: schemas.ApiClientUpdate, db: Session = Depends(get_db)):
     client = crud.update_api_client(db, client_id, data)
     if not client:

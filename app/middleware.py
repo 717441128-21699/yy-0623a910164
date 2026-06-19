@@ -4,7 +4,7 @@ from datetime import datetime
 from typing import Optional
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
-from starlette.responses import Response
+from starlette.responses import Response, JSONResponse
 
 from fastapi import Depends, HTTPException, status, Header
 from sqlalchemy.orm import Session
@@ -29,6 +29,14 @@ def categorize_api(endpoint: str, method: str) -> str:
         return "system"
 
 
+def get_quota_type_for_endpoint(endpoint: str) -> Optional[str]:
+    if endpoint.startswith("/api/compare/generate"):
+        return "compare"
+    if endpoint.startswith("/api/photos/submit"):
+        return "photo"
+    return None
+
+
 class ApiLoggingMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
         start_time = time.time()
@@ -44,12 +52,68 @@ class ApiLoggingMiddleware(BaseHTTPMiddleware):
             return {"type": "http.request", "body": body_bytes, "more_body": False}
 
         request = Request(request.scope, receive)
+        path = request.url.path
+
+        if path.startswith("/api/"):
+            api_key = request.headers.get("X-API-Key", "")
+            try:
+                db = next(get_db())
+                try:
+                    client = None
+                    if api_key:
+                        client = crud.get_api_client_by_key(db, api_key)
+                    client_id = client.id if client else None
+
+                    category = categorize_api(path, request.method)
+                    if category not in ["admin", "system"]:
+                        quota_type = get_quota_type_for_endpoint(path)
+                        if quota_type:
+                            check = crud.check_quota(db, client_id, quota_type)
+                            if not check["allowed"]:
+                                duration_ms = int((time.time() - start_time) * 1000)
+                                patient_no = ""
+                                visit_date = None
+                                try:
+                                    if request_body and request.method in ["POST", "PUT", "PATCH"]:
+                                        body_json = json.loads(request_body)
+                                        patient_no = body_json.get("patient_no", "")
+                                except Exception:
+                                    pass
+                                crud.log_api_call(
+                                    db=db,
+                                    endpoint=path,
+                                    method=request.method,
+                                    patient_no=patient_no,
+                                    visit_date=visit_date,
+                                    status_code=429,
+                                    duration_ms=duration_ms,
+                                    request_body=request_body[:2000] if len(request_body) > 2000 else request_body,
+                                    error_message=check["message"],
+                                    client_ip=request.client.host if request.client else "",
+                                    user_agent=request.headers.get("user-agent", "")[:500],
+                                    client_id=client_id,
+                                    api_category=category
+                                )
+                                return JSONResponse(
+                                    status_code=429,
+                                    content={
+                                        "success": False,
+                                        "message": check["message"],
+                                        "used": check.get("used", 0),
+                                        "limit": check.get("limit", 0)
+                                    }
+                                )
+                finally:
+                    db.close()
+            except Exception:
+                pass
+
         response = await call_next(request)
 
         duration_ms = int((time.time() - start_time) * 1000)
         status_code = response.status_code
 
-        if request.url.path.startswith("/api/") or request.url.path == "/" or request.url.path == "/health":
+        if path.startswith("/api/") or path == "/" or path == "/health":
             try:
                 db = next(get_db())
                 api_key = request.headers.get("X-API-Key", "")
@@ -71,7 +135,7 @@ class ApiLoggingMiddleware(BaseHTTPMiddleware):
 
                 crud.log_api_call(
                     db=db,
-                    endpoint=request.url.path,
+                    endpoint=path,
                     method=request.method,
                     patient_no=patient_no,
                     visit_date=visit_date,
@@ -82,7 +146,7 @@ class ApiLoggingMiddleware(BaseHTTPMiddleware):
                     client_ip=request.client.host if request.client else "",
                     user_agent=request.headers.get("user-agent", "")[:500],
                     client_id=client.id if client else None,
-                    api_category=categorize_api(request.url.path, request.method)
+                    api_category=categorize_api(path, request.method)
                 )
                 db.close()
             except Exception:
@@ -101,7 +165,7 @@ async def get_current_client(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="缺少 API Key"
             )
-        return None
+        return crud.get_or_create_default_client(db)
 
     client = crud.get_api_client_by_key(db, x_api_key)
     if not client:

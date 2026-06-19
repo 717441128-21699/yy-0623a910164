@@ -104,7 +104,7 @@ async def get_statistics(
     )
 
 
-@router.get("/client-stats", response_model=schemas.ClientStatsResponse, summary="按接入方维度统计")
+@router.get("/client-stats", response_model=schemas.ClientStatsResponse, summary="按接入方维度统计(含用量进度)")
 async def get_client_statistics(db: Session = Depends(get_db)):
     stats_list = crud.get_client_stats(db)
     items = [schemas.ClientStatsItem(**s) for s in stats_list]
@@ -112,4 +112,76 @@ async def get_client_statistics(db: Session = Depends(get_db)):
         success=True,
         total=len(items),
         stats=items
+    )
+
+
+@router.get("/clients/{client_id}/detail", response_model=schemas.ApiClientDetailResponse, summary="接入方详情(含统计/最近调用/回调失败/异常照片)")
+async def get_client_detail(
+    client_id: int,
+    logs_limit: int = Query(20, ge=1, le=100),
+    callbacks_limit: int = Query(20, ge=1, le=100),
+    photos_limit: int = Query(20, ge=1, le=100),
+    db: Session = Depends(get_db)
+):
+    client = crud.get_api_client(db, client_id)
+    if not client:
+        raise HTTPException(status_code=404, detail="接入方不存在")
+
+    stats = crud.get_stats(db, client_id=client_id)
+
+    usage = crud.get_daily_usage(db, client_id) or models.DailyUsage(
+        client_id=client_id, usage_date=date.today(),
+        api_calls=0, photo_uploads=0, compare_generations=0
+    )
+    daily_usage_info = schemas.DailyUsageInfo(
+        client_id=client_id,
+        usage_date=usage.usage_date if usage.id else date.today(),
+        api_calls=usage.api_calls,
+        photo_uploads=usage.photo_uploads,
+        compare_generations=usage.compare_generations,
+        api_quota_limit=client.daily_api_quota,
+        photo_quota_limit=client.daily_photo_quota
+    )
+
+    logs = crud.get_api_logs(db, skip=0, limit=logs_limit, client_id=client_id)
+    log_items = []
+    for log in logs:
+        data = schemas.ApiCallLogItem.model_validate(log).model_dump()
+        data["client_name"] = client.name
+        log_items.append(schemas.ApiCallLogItem(**data))
+
+    failed_callbacks = crud.get_failed_callback_tasks(db, client_id=client_id, limit=callbacks_limit)
+    failed_items = [schemas.FailedCallbackItem.model_validate(t) for t in failed_callbacks]
+
+    abnormal_photos = crud.get_abnormal_photos(db, skip=0, limit=photos_limit, client_id=client_id)
+    photo_items = []
+    for photo in abnormal_photos:
+        visit_record = db.query(models.VisitRecord).filter(models.VisitRecord.id == photo.visit_record_id).first()
+        patient = db.query(models.Patient).filter(models.Patient.id == photo.patient_id).first()
+        photo_items.append(schemas.AbnormalPhotoItem(
+            id=photo.id,
+            patient_no=patient.patient_no if patient else "",
+            angle=photo.angle,
+            file_url=photo.file_url,
+            visit_date=visit_record.visit_date if visit_record else None,
+            is_too_dark=photo.is_too_dark,
+            is_blurry=photo.is_blurry,
+            is_not_centered=photo.is_not_centered,
+            is_occluded=photo.is_occluded,
+            quality_notes=photo.quality_notes,
+            created_at=photo.created_at
+        ))
+
+    client_info = schemas.ApiClientInfo.model_validate(client)
+    client_info.total_api_calls = stats["total_api_calls"]
+    client_info.total_abnormal_photos = stats["abnormal_photo_count"]
+
+    return schemas.ApiClientDetailResponse(
+        success=True,
+        client=client_info,
+        stats=stats,
+        daily_usage=daily_usage_info,
+        recent_logs=log_items,
+        failed_callbacks=failed_items,
+        abnormal_photos=photo_items
     )

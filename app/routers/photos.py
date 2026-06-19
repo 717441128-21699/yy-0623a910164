@@ -120,18 +120,17 @@ async def get_visit_photos(
     db: Session = Depends(get_db),
     current_client: Optional[models.ApiClient] = Depends(get_current_client)
 ):
-    patient = db.query(models.Patient).filter(
-        models.Patient.patient_no == patient_no
-    ).first()
+    client_id = current_client.id if current_client else None
 
+    patient = crud.get_patient(db, patient_no, client_id)
     if not patient:
         raise HTTPException(status_code=404, detail="患者不存在")
 
-    visit_record = crud.get_visit_by_date(db, patient.id, visit_date)
+    visit_record = crud.get_visit_by_date(db, patient.id, visit_date, client_id)
     if not visit_record:
         raise HTTPException(status_code=404, detail="复诊记录不存在")
 
-    photos = crud.get_photos_by_visit(db, visit_record.id)
+    photos = crud.get_photos_by_visit(db, visit_record.id, client_id)
 
     return {
         "success": True,

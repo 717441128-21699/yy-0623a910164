@@ -18,18 +18,12 @@ from app import crud, schemas
 def init_default_client():
     db = SessionLocal()
     try:
+        default_client = crud.get_or_create_default_client(db)
+        if default_client:
+            print(f"已加载默认接入方: {default_client.name}, ID={default_client.id}, is_default={default_client.is_default}")
         clients = crud.list_api_clients(db, limit=1)
         if not clients:
-            default_client = crud.create_api_client(
-                db,
-                schemas.ApiClientCreate(
-                    name="默认接入方",
-                    client_type="vendor",
-                    contact_name="系统管理员",
-                    is_active=True
-                )
-            )
-            print(f"已创建默认接入方: {default_client.name}, API Key: {default_client.api_key}")
+            print("警告：未找到任何接入方")
     except Exception as e:
         print(f"初始化默认接入方失败: {e}")
     finally:
@@ -62,7 +56,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title=settings.app_name,
     version=settings.app_version,
-    description="正畸复诊拍照对比后端服务，提供照片质量检查、对比图生成、智能提示、接入方管理和回调通知能力，可无缝嵌入现有口腔管理系统。",
+    description="正畸复诊拍照对比后端服务 v1.2.0：提供照片质量检查、对比图生成、智能提示、接入方(API Key)隔离与管理、配额限流、回调通知(含详细执行记录)，可无缝嵌入现有口腔管理系统。",
     lifespan=lifespan
 )
 
@@ -93,7 +87,15 @@ async def root():
         "version": settings.app_version,
         "status": "running",
         "require_api_key": settings.require_api_key,
-        "standard_angles": settings.standard_angles
+        "standard_angles": settings.standard_angles,
+        "features": [
+            "access_control: API Key 接入方隔离",
+            "data_isolation: 患者/照片/对比按接入方隔离",
+            "quota_control: 每日API/照片配额 + 对比开关",
+            "callback_notifications: 详细执行记录 + 同步/异步重试",
+            "public_urls: 静态公开URL访问照片与对比图",
+            "admin_dashboard: 接入方维度统计 + 调用/回调/异常详情"
+        ]
     }
 
 

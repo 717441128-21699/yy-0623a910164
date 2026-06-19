@@ -149,6 +149,9 @@ class ApiClientBase(BaseModel):
     contact_email: str = ""
     settings: Optional[Dict[str, Any]] = None
     is_active: bool = True
+    daily_api_quota: int = Field(0, description="每日API调用上限(0表示不限)")
+    daily_photo_quota: int = Field(0, description="每日照片上传上限(0表示不限)")
+    allow_compare: bool = Field(True, description="是否允许生成对比图")
 
 
 class ApiClientCreate(ApiClientBase):
@@ -163,6 +166,9 @@ class ApiClientUpdate(BaseModel):
     contact_email: Optional[str] = None
     settings: Optional[Dict[str, Any]] = None
     is_active: Optional[bool] = None
+    daily_api_quota: Optional[int] = None
+    daily_photo_quota: Optional[int] = None
+    allow_compare: Optional[bool] = None
 
 
 class ApiClientInfo(BaseModel):
@@ -177,6 +183,10 @@ class ApiClientInfo(BaseModel):
     settings: Dict[str, Any] = {}
     created_at: datetime
     updated_at: Optional[datetime] = None
+    daily_api_quota: int = 0
+    daily_photo_quota: int = 0
+    allow_compare: bool = True
+    is_default: bool = False
     total_api_calls: int = 0
     total_abnormal_photos: int = 0
 
@@ -188,6 +198,46 @@ class ApiClientListResponse(BaseModel):
     success: bool
     total: int
     clients: List[ApiClientInfo]
+
+
+class DailyUsageInfo(BaseModel):
+    client_id: int
+    usage_date: date
+    api_calls: int = 0
+    photo_uploads: int = 0
+    compare_generations: int = 0
+    api_quota_limit: int = 0
+    photo_quota_limit: int = 0
+
+    class Config:
+        from_attributes = True
+
+
+class FailedCallbackItem(BaseModel):
+    id: int
+    event_type: str
+    patient_no: str
+    status: str
+    retry_count: int
+    max_retries: int
+    last_error: str
+    last_response_status: Optional[int] = None
+    callback_url: str
+    last_sent_at: Optional[datetime] = None
+    next_retry_at: Optional[datetime] = None
+
+    class Config:
+        from_attributes = True
+
+
+class ApiClientDetailResponse(BaseModel):
+    success: bool
+    client: ApiClientInfo
+    stats: Dict[str, Any]
+    daily_usage: DailyUsageInfo
+    recent_logs: List[ApiCallLogItem]
+    failed_callbacks: List[FailedCallbackItem]
+    abnormal_photos: List[AbnormalPhotoItem]
 
 
 class CallbackConfigBase(BaseModel):
@@ -228,6 +278,22 @@ class CallbackConfigInfo(BaseModel):
         from_attributes = True
 
 
+class CallbackExecutionRecordItem(BaseModel):
+    id: int
+    task_id: int
+    attempt_no: int
+    callback_url: str
+    response_status: Optional[int] = None
+    response_body: str = ""
+    duration_ms: int = 0
+    success: bool = False
+    error_message: str = ""
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
 class CallbackTaskItem(BaseModel):
     id: int
     client_id: Optional[int] = None
@@ -237,13 +303,32 @@ class CallbackTaskItem(BaseModel):
     retry_count: int
     max_retries: int
     last_error: str
+    last_response_status: Optional[int] = None
+    last_response_body: str = ""
     callback_url: str
     last_sent_at: Optional[datetime] = None
     next_retry_at: Optional[datetime] = None
     created_at: datetime
+    executions: List[CallbackExecutionRecordItem] = []
 
     class Config:
         from_attributes = True
+
+
+class CallbackTaskDetailResponse(BaseModel):
+    success: bool
+    task: CallbackTaskItem
+    executions: List[CallbackExecutionRecordItem]
+
+
+class CallbackRetryResponse(BaseModel):
+    success: bool
+    task_id: int
+    new_status: str
+    success_flag: bool = False
+    response_status: Optional[int] = None
+    error_message: str = ""
+    message: str = ""
 
 
 class CallbackListResponse(BaseModel):
@@ -265,9 +350,19 @@ class ClientStatsItem(BaseModel):
     total_api_calls: int
     success_calls: int
     failed_calls: int
+    total_patients: int
     total_photos: int
     abnormal_photos: int
     total_compares: int
+    daily_api_calls: int
+    daily_photo_uploads: int
+    daily_compares: int
+    daily_api_quota: int
+    daily_photo_quota: int
+    api_quota_used_pct: float
+    photo_quota_used_pct: float
+    allow_compare: bool
+    is_default: bool
 
 
 class ClientStatsResponse(BaseModel):

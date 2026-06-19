@@ -3,7 +3,7 @@ import time
 import hashlib
 import hmac
 import asyncio
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, Tuple
 from datetime import datetime
 
 import httpx
@@ -29,20 +29,30 @@ class CallbackService:
         ).hexdigest()
         return signature
 
-    async def send_callback(self, task: models.CallbackTask, config: Optional[models.CallbackConfig]) -> bool:
+    async def send_callback(self, task: models.CallbackTask, config: Optional[models.CallbackConfig]
+                            ) -> Tuple[bool, Optional[int], str, str, int]:
         if not task.callback_url:
-            return False
+            return False, None, "", "回调地址为空", 0
 
         payload = task.payload
+        payload_str = json.dumps(payload, ensure_ascii=False)
         headers = {
             "Content-Type": "application/json",
             "X-Callback-Event": task.event_type,
             "X-Callback-Timestamp": str(int(time.time())),
         }
+        headers_for_record = dict(headers)
 
         if config and config.secret_token:
             signature = self._generate_signature(config.secret_token, payload)
             headers["X-Callback-Signature"] = signature
+            headers_for_record["X-Callback-Signature"] = signature
+
+        start = time.time()
+        response_status = None
+        response_body = ""
+        error_msg = ""
+        success = False
 
         try:
             async with httpx.AsyncClient(timeout=self.timeout) as client:
@@ -51,31 +61,148 @@ class CallbackService:
                     json=payload,
                     headers=headers
                 )
-                return 200 <= response.status_code < 300
+                response_status = response.status_code
+                try:
+                    response_body = response.text
+                except Exception:
+                    response_body = ""
+                success = 200 <= response.status_code < 300
+                if not success:
+                    error_msg = f"HTTP {response.status_code}"
+        except httpx.TimeoutException:
+            error_msg = f"请求超时({self.timeout}s)"
         except Exception as e:
-            return False
+            error_msg = str(e)[:500]
+
+        duration_ms = int((time.time() - start) * 1000)
+        return success, response_status, response_body[:2000], error_msg, duration_ms, headers_for_record, payload_str
 
     async def process_task(self, task: models.CallbackTask):
         db = SessionLocal()
+        attempt_no = task.retry_count + 1
         try:
             config = crud.get_callback_config(db, task.config_id)
-            success = await self.send_callback(task, config)
+            result = await self.send_callback(task, config)
+            success, response_status, response_body, error_msg, duration_ms = result[0], result[1], result[2], result[3], result[4]
+            headers_record = result[5] if len(result) > 5 else {}
+            payload_record = result[6] if len(result) > 6 else ""
 
-            if success:
-                crud.update_callback_task_status(db, task.id, "success", "")
-            else:
-                if task.retry_count + 1 >= task.max_retries:
-                    crud.update_callback_task_status(db, task.id, "failed", "达到最大重试次数")
-                else:
-                    crud.update_callback_task_status(db, task.id, "retrying", "")
-        except Exception as e:
             try:
-                if task.retry_count + 1 >= task.max_retries:
-                    crud.update_callback_task_status(db, task.id, "failed", str(e))
-                else:
-                    crud.update_callback_task_status(db, task.id, "retrying", str(e))
+                crud.record_callback_execution(
+                    db,
+                    task_id=task.id,
+                    attempt_no=attempt_no,
+                    callback_url=task.callback_url,
+                    request_headers=headers_record,
+                    request_body=payload_record,
+                    response_status=response_status,
+                    response_body=response_body,
+                    duration_ms=duration_ms,
+                    success=success,
+                    error_message=error_msg
+                )
             except Exception:
                 pass
+
+            if success:
+                crud.update_callback_task_status(
+                    db, task.id, "success",
+                    response_status=response_status,
+                    response_body=response_body
+                )
+            else:
+                if attempt_no >= task.max_retries:
+                    crud.update_callback_task_status(
+                        db, task.id, "failed", error_msg,
+                        response_status=response_status,
+                        response_body=response_body
+                    )
+                else:
+                    crud.update_callback_task_status(
+                        db, task.id, "retrying", error_msg,
+                        response_status=response_status,
+                        response_body=response_body
+                    )
+        except Exception as e:
+            err = str(e)[:500]
+            try:
+                crud.record_callback_execution(
+                    db, task_id=task.id, attempt_no=attempt_no,
+                    callback_url=task.callback_url,
+                    request_headers={}, request_body="",
+                    response_status=None, response_body="",
+                    duration_ms=0, success=False,
+                    error_message=err
+                )
+            except Exception:
+                pass
+            try:
+                if attempt_no >= task.max_retries:
+                    crud.update_callback_task_status(db, task.id, "failed", err)
+                else:
+                    crud.update_callback_task_status(db, task.id, "retrying", err)
+            except Exception:
+                pass
+        finally:
+            db.close()
+
+    async def process_task_sync(self, task_id: int) -> Dict[str, Any]:
+        db = SessionLocal()
+        try:
+            task = crud.get_callback_task(db, task_id)
+            if not task:
+                return {"success": False, "error": "任务不存在"}
+
+            attempt_no = task.retry_count + 1
+            config = crud.get_callback_config(db, task.config_id)
+            result = await self.send_callback(task, config)
+            succ, resp_status, resp_body, err, dur = result[0], result[1], result[2], result[3], result[4]
+            headers_record = result[5] if len(result) > 5 else {}
+            payload_record = result[6] if len(result) > 6 else ""
+
+            try:
+                crud.record_callback_execution(
+                    db, task_id=task.id, attempt_no=attempt_no,
+                    callback_url=task.callback_url,
+                    request_headers=headers_record,
+                    request_body=payload_record,
+                    response_status=resp_status,
+                    response_body=resp_body,
+                    duration_ms=dur,
+                    success=succ,
+                    error_message=err
+                )
+            except Exception:
+                pass
+
+            if succ:
+                crud.update_callback_task_status(
+                    db, task.id, "success",
+                    response_status=resp_status, response_body=resp_body
+                )
+                new_status = "success"
+            else:
+                if attempt_no >= task.max_retries:
+                    crud.update_callback_task_status(
+                        db, task.id, "failed", err,
+                        response_status=resp_status, response_body=resp_body
+                    )
+                    new_status = "failed"
+                else:
+                    crud.update_callback_task_status(
+                        db, task.id, "retrying", err,
+                        response_status=resp_status, response_body=resp_body
+                    )
+                    new_status = "retrying"
+
+            return {
+                "success": True,
+                "success_flag": succ,
+                "new_status": new_status,
+                "response_status": resp_status,
+                "error_message": err,
+                "duration_ms": dur
+            }
         finally:
             db.close()
 

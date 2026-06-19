@@ -1,6 +1,6 @@
 import secrets
 from sqlalchemy.orm import Session
-from sqlalchemy import desc, and_, or_, func
+from sqlalchemy import desc, and_, or_, func, distinct
 from datetime import date, datetime, timedelta
 from typing import List, Optional, Dict, Any
 
@@ -12,11 +12,40 @@ def generate_api_key() -> str:
     return "ak_" + secrets.token_hex(24)
 
 
+def get_default_client(db: Session) -> Optional[models.ApiClient]:
+    return db.query(models.ApiClient).filter(models.ApiClient.is_default == True).first()
+
+
+def get_or_create_default_client(db: Session) -> models.ApiClient:
+    client = get_default_client(db)
+    if not client:
+        client = models.ApiClient(
+            name="默认接入方",
+            api_key=generate_api_key(),
+            client_type="vendor",
+            contact_name="系统管理员",
+            is_active=True,
+            is_default=True,
+            daily_api_quota=0,
+            daily_photo_quota=0,
+            allow_compare=True
+        )
+        db.add(client)
+        db.commit()
+        db.refresh(client)
+    return client
+
+
 def get_or_create_patient(db: Session, patient_no: str, patient_name: str = "",
                            client_id: Optional[int] = None) -> models.Patient:
-    patient = db.query(models.Patient).filter(models.Patient.patient_no == patient_no).first()
+    query = db.query(models.Patient).filter(models.Patient.patient_no == patient_no)
+    if client_id is not None:
+        query = query.filter(models.Patient.client_id == client_id)
+    else:
+        query = query.filter(models.Patient.client_id.is_(None))
+    patient = query.first()
     if not patient:
-        patient = models.Patient(patient_no=patient_no, name=patient_name)
+        patient = models.Patient(patient_no=patient_no, name=patient_name, client_id=client_id)
         db.add(patient)
         db.commit()
         db.refresh(patient)
@@ -27,13 +56,27 @@ def get_or_create_patient(db: Session, patient_no: str, patient_name: str = "",
     return patient
 
 
+def get_patient(db: Session, patient_no: str, client_id: Optional[int] = None) -> Optional[models.Patient]:
+    query = db.query(models.Patient).filter(models.Patient.patient_no == patient_no)
+    if client_id is not None:
+        query = query.filter(models.Patient.client_id == client_id)
+    else:
+        query = query.filter(models.Patient.client_id.is_(None))
+    return query.first()
+
+
 def get_or_create_visit_record(db: Session, patient_id: int, visit_date: date,
                                 is_initial: bool = False,
                                 client_id: Optional[int] = None) -> models.VisitRecord:
-    record = db.query(models.VisitRecord).filter(
+    query = db.query(models.VisitRecord).filter(
         models.VisitRecord.patient_id == patient_id,
         models.VisitRecord.visit_date == visit_date
-    ).first()
+    )
+    if client_id is not None:
+        query = query.filter(models.VisitRecord.client_id == client_id)
+    else:
+        query = query.filter(models.VisitRecord.client_id.is_(None))
+    record = query.first()
 
     if not record:
         record = models.VisitRecord(
@@ -60,25 +103,34 @@ def get_or_create_visit_record(db: Session, patient_id: int, visit_date: date,
     return record
 
 
-def get_visit_by_date(db: Session, patient_id: int, visit_date: date) -> Optional[models.VisitRecord]:
-    return db.query(models.VisitRecord).filter(
+def get_visit_by_date(db: Session, patient_id: int, visit_date: date, client_id: Optional[int] = None) -> Optional[models.VisitRecord]:
+    query = db.query(models.VisitRecord).filter(
         models.VisitRecord.patient_id == patient_id,
         models.VisitRecord.visit_date == visit_date
-    ).first()
+    )
+    if client_id is not None:
+        query = query.filter(models.VisitRecord.client_id == client_id)
+    return query.first()
 
 
-def get_initial_visit(db: Session, patient_id: int) -> Optional[models.VisitRecord]:
-    return db.query(models.VisitRecord).filter(
+def get_initial_visit(db: Session, patient_id: int, client_id: Optional[int] = None) -> Optional[models.VisitRecord]:
+    query = db.query(models.VisitRecord).filter(
         models.VisitRecord.patient_id == patient_id,
         models.VisitRecord.is_initial == True
-    ).order_by(models.VisitRecord.visit_date.asc()).first()
+    )
+    if client_id is not None:
+        query = query.filter(models.VisitRecord.client_id == client_id)
+    return query.order_by(models.VisitRecord.visit_date.asc()).first()
 
 
-def get_previous_visit(db: Session, patient_id: int, current_date: date) -> Optional[models.VisitRecord]:
-    return db.query(models.VisitRecord).filter(
+def get_previous_visit(db: Session, patient_id: int, current_date: date, client_id: Optional[int] = None) -> Optional[models.VisitRecord]:
+    query = db.query(models.VisitRecord).filter(
         models.VisitRecord.patient_id == patient_id,
         models.VisitRecord.visit_date < current_date
-    ).order_by(desc(models.VisitRecord.visit_date)).first()
+    )
+    if client_id is not None:
+        query = query.filter(models.VisitRecord.client_id == client_id)
+    return query.order_by(desc(models.VisitRecord.visit_date)).first()
 
 
 def add_photo(db: Session, patient_id: int, visit_record_id: int,
@@ -110,13 +162,15 @@ def add_photo(db: Session, patient_id: int, visit_record_id: int,
     db.add(photo)
     db.commit()
     db.refresh(photo)
+    increment_daily_usage(db, client_id, photo_uploads=1)
     return photo
 
 
-def get_photos_by_visit(db: Session, visit_record_id: int) -> List[models.Photo]:
-    return db.query(models.Photo).filter(
-        models.Photo.visit_record_id == visit_record_id
-    ).all()
+def get_photos_by_visit(db: Session, visit_record_id: int, client_id: Optional[int] = None) -> List[models.Photo]:
+    query = db.query(models.Photo).filter(models.Photo.visit_record_id == visit_record_id)
+    if client_id is not None:
+        query = query.filter(models.Photo.client_id == client_id)
+    return query.all()
 
 
 def log_api_call(db: Session, endpoint: str, method: str, patient_no: str = "",
@@ -140,6 +194,8 @@ def log_api_call(db: Session, endpoint: str, method: str, patient_no: str = "",
         user_agent=user_agent
     )
     db.add(log)
+    if api_category and api_category != "system":
+        increment_daily_usage(db, client_id, api_calls=1)
     db.commit()
     db.refresh(log)
     return log
@@ -213,6 +269,15 @@ def count_abnormal_photos(db: Session, client_id: Optional[int] = None) -> int:
     return query.count()
 
 
+def count_patients(db: Session, client_id: Optional[int] = None) -> int:
+    query = db.query(models.Patient)
+    if client_id is not None:
+        query = query.filter(models.Patient.client_id == client_id)
+    else:
+        query = query.filter(models.Patient.client_id.is_(None))
+    return query.count()
+
+
 def get_stats(db: Session, client_id: Optional[int] = None) -> dict:
     patient_q = db.query(models.Patient)
     photo_q = db.query(models.Photo)
@@ -220,11 +285,14 @@ def get_stats(db: Session, client_id: Optional[int] = None) -> dict:
     log_q = db.query(models.ApiCallLog)
     abnormal_q = db.query(models.Photo).filter(models.Photo.quality_passed == False)
 
-    if client_id:
+    if client_id is not None:
+        patient_q = patient_q.filter(models.Patient.client_id == client_id)
         photo_q = photo_q.filter(models.Photo.client_id == client_id)
         compare_q = compare_q.filter(models.CompareResult.client_id == client_id)
         log_q = log_q.filter(models.ApiCallLog.client_id == client_id)
         abnormal_q = abnormal_q.filter(models.Photo.client_id == client_id)
+    else:
+        patient_q = patient_q.filter(models.Patient.client_id.is_(None))
 
     return {
         "total_patients": patient_q.count(),
@@ -252,6 +320,7 @@ def add_compare_result(db: Session, patient_id: int, compare_mode: str,
         angles_compared=angles_compared
     )
     db.add(result)
+    increment_daily_usage(db, client_id, compare_generations=1)
     db.commit()
     db.refresh(result)
     return result
@@ -274,7 +343,11 @@ def create_api_client(db: Session, data: schemas.ApiClientCreate) -> models.ApiC
         contact_phone=data.contact_phone,
         contact_email=data.contact_email,
         settings=data.settings or {},
-        is_active=data.is_active
+        is_active=data.is_active,
+        daily_api_quota=data.daily_api_quota,
+        daily_photo_quota=data.daily_photo_quota,
+        allow_compare=data.allow_compare,
+        is_default=False
     )
     db.add(client)
     db.commit()
@@ -315,6 +388,94 @@ def count_api_clients(db: Session, is_active: Optional[bool] = None) -> int:
     if is_active is not None:
         query = query.filter(models.ApiClient.is_active == is_active)
     return query.count()
+
+
+def get_or_create_daily_usage(db: Session, client_id: Optional[int], usage_date: Optional[date] = None) -> models.DailyUsage:
+    if usage_date is None:
+        usage_date = date.today()
+    query = db.query(models.DailyUsage).filter(models.DailyUsage.usage_date == usage_date)
+    if client_id is not None:
+        query = query.filter(models.DailyUsage.client_id == client_id)
+    usage = query.first()
+    if not usage:
+        usage = models.DailyUsage(
+            client_id=client_id if client_id is not None else 0,
+            usage_date=usage_date,
+            api_calls=0,
+            photo_uploads=0,
+            compare_generations=0
+        )
+        db.add(usage)
+        db.commit()
+        db.refresh(usage)
+    return usage
+
+
+def increment_daily_usage(db: Session, client_id: Optional[int],
+                          api_calls: int = 0, photo_uploads: int = 0,
+                          compare_generations: int = 0):
+    try:
+        usage = get_or_create_daily_usage(db, client_id)
+        if api_calls:
+            usage.api_calls += api_calls
+        if photo_uploads:
+            usage.photo_uploads += photo_uploads
+        if compare_generations:
+            usage.compare_generations += compare_generations
+        db.commit()
+    except Exception:
+        db.rollback()
+
+
+def get_daily_usage(db: Session, client_id: Optional[int], usage_date: Optional[date] = None) -> Optional[models.DailyUsage]:
+    if usage_date is None:
+        usage_date = date.today()
+    query = db.query(models.DailyUsage).filter(models.DailyUsage.usage_date == usage_date)
+    if client_id is not None:
+        query = query.filter(models.DailyUsage.client_id == client_id)
+    return query.first()
+
+
+def check_quota(db: Session, client_id: Optional[int], quota_type: str = "api") -> Dict[str, Any]:
+    client = None
+    if client_id is not None:
+        client = get_api_client(db, client_id)
+
+    usage = get_daily_usage(db, client_id) or models.DailyUsage(
+        client_id=client_id or 0, usage_date=date.today(),
+        api_calls=0, photo_uploads=0, compare_generations=0
+    )
+
+    result = {
+        "allowed": True,
+        "used": 0,
+        "limit": 0,
+        "message": ""
+    }
+
+    if quota_type == "api":
+        quota = client.daily_api_quota if client else 0
+        used = usage.api_calls
+        if quota and used >= quota:
+            result["allowed"] = False
+            result["message"] = f"今日API调用已达上限({quota})次，请明日再试或联系管理员升级配额"
+    elif quota_type == "photo":
+        quota = client.daily_photo_quota if client else 0
+        used = usage.photo_uploads
+        if quota and used >= quota:
+            result["allowed"] = False
+            result["message"] = f"今日照片上传已达上限({quota})张，请明日再试或联系管理员升级配额"
+    elif quota_type == "compare":
+        allow = client.allow_compare if client else True
+        if not allow:
+            result["allowed"] = False
+            result["message"] = "该接入方未开通对比生成权限，请联系管理员"
+
+    if quota_type in ["api", "photo"]:
+        result["used"] = used
+        result["limit"] = client.daily_api_quota if (client and quota_type == "api") else (client.daily_photo_quota if (client and quota_type == "photo") else 0)
+
+    return result
 
 
 def create_callback_config(db: Session, data: schemas.CallbackConfigCreate) -> models.CallbackConfig:
@@ -407,14 +568,43 @@ def create_callback_task(db: Session, config_id: int, event_type: str,
     return task
 
 
+def record_callback_execution(db: Session, task_id: int, attempt_no: int,
+                               callback_url: str, request_headers: Dict[str, Any],
+                               request_body: str, response_status: Optional[int],
+                               response_body: str, duration_ms: int,
+                               success: bool, error_message: str) -> models.CallbackExecutionRecord:
+    record = models.CallbackExecutionRecord(
+        task_id=task_id,
+        attempt_no=attempt_no,
+        callback_url=callback_url,
+        request_headers=request_headers,
+        request_body=request_body[:2000] if len(request_body) > 2000 else request_body,
+        response_status=response_status,
+        response_body=response_body[:2000] if len(response_body) > 2000 else response_body,
+        duration_ms=duration_ms,
+        success=success,
+        error_message=error_message
+    )
+    db.add(record)
+    db.commit()
+    db.refresh(record)
+    return record
+
+
 def update_callback_task_status(db: Session, task_id: int, status: str,
-                                 error_message: str = "") -> Optional[models.CallbackTask]:
+                                 error_message: str = "",
+                                 response_status: Optional[int] = None,
+                                 response_body: str = "") -> Optional[models.CallbackTask]:
     task = db.query(models.CallbackTask).filter(models.CallbackTask.id == task_id).first()
     if not task:
         return None
     task.status = status
     task.last_error = error_message
     task.last_sent_at = datetime.utcnow()
+    if response_status is not None:
+        task.last_response_status = response_status
+    if response_body:
+        task.last_response_body = response_body[:500] if len(response_body) > 500 else response_body
     if status == "retrying":
         task.retry_count += 1
         config = get_callback_config(db, task.config_id)
@@ -427,6 +617,16 @@ def update_callback_task_status(db: Session, task_id: int, status: str,
     db.commit()
     db.refresh(task)
     return task
+
+
+def get_callback_task(db: Session, task_id: int) -> Optional[models.CallbackTask]:
+    return db.query(models.CallbackTask).filter(models.CallbackTask.id == task_id).first()
+
+
+def get_callback_executions(db: Session, task_id: int, limit: int = 50) -> List[models.CallbackExecutionRecord]:
+    return db.query(models.CallbackExecutionRecord).filter(
+        models.CallbackExecutionRecord.task_id == task_id
+    ).order_by(desc(models.CallbackExecutionRecord.created_at)).limit(limit).all()
 
 
 def get_pending_callback_tasks(db: Session, limit: int = 50) -> List[models.CallbackTask]:
@@ -445,7 +645,8 @@ def get_pending_callback_tasks(db: Session, limit: int = 50) -> List[models.Call
 def list_callback_tasks(db: Session, client_id: Optional[int] = None,
                          status: Optional[str] = None,
                          event_type: Optional[str] = None,
-                         skip: int = 0, limit: int = 100) -> List[models.CallbackTask]:
+                         skip: int = 0, limit: int = 100,
+                         include_executions: bool = False) -> List[models.CallbackTask]:
     query = db.query(models.CallbackTask)
     if client_id:
         query = query.filter(models.CallbackTask.client_id == client_id)
@@ -453,7 +654,11 @@ def list_callback_tasks(db: Session, client_id: Optional[int] = None,
         query = query.filter(models.CallbackTask.status == status)
     if event_type:
         query = query.filter(models.CallbackTask.event_type == event_type)
-    return query.order_by(desc(models.CallbackTask.created_at)).offset(skip).limit(limit).all()
+    tasks = query.order_by(desc(models.CallbackTask.created_at)).offset(skip).limit(limit).all()
+    if include_executions:
+        for t in tasks:
+            _ = t.executions
+    return tasks
 
 
 def count_callback_tasks(db: Session, client_id: Optional[int] = None,
@@ -469,8 +674,18 @@ def count_callback_tasks(db: Session, client_id: Optional[int] = None,
     return query.count()
 
 
+def get_failed_callback_tasks(db: Session, client_id: Optional[int] = None, limit: int = 20) -> List[models.CallbackTask]:
+    query = db.query(models.CallbackTask).filter(
+        or_(models.CallbackTask.status == "failed", models.CallbackTask.status == "retrying")
+    )
+    if client_id:
+        query = query.filter(models.CallbackTask.client_id == client_id)
+    return query.order_by(desc(models.CallbackTask.last_sent_at)).limit(limit).all()
+
+
 def get_client_stats(db: Session) -> List[Dict[str, Any]]:
     clients = list_api_clients(db)
+    today = date.today()
     result = []
     for client in clients:
         total_calls = count_api_logs(db, client_id=client.id)
@@ -479,6 +694,19 @@ def get_client_stats(db: Session) -> List[Dict[str, Any]]:
         total_photos = db.query(models.Photo).filter(models.Photo.client_id == client.id).count()
         abnormal_photos = count_abnormal_photos(db, client_id=client.id)
         total_compares = db.query(models.CompareResult).filter(models.CompareResult.client_id == client.id).count()
+        total_patients = count_patients(db, client_id=client.id)
+
+        usage = get_daily_usage(db, client.id)
+        daily_api = usage.api_calls if usage else 0
+        daily_photos = usage.photo_uploads if usage else 0
+        daily_compares = usage.compare_generations if usage else 0
+
+        api_pct = 0.0
+        if client.daily_api_quota > 0:
+            api_pct = round(daily_api * 100.0 / client.daily_api_quota, 2)
+        photo_pct = 0.0
+        if client.daily_photo_quota > 0:
+            photo_pct = round(daily_photos * 100.0 / client.daily_photo_quota, 2)
 
         result.append({
             "client_id": client.id,
@@ -487,8 +715,18 @@ def get_client_stats(db: Session) -> List[Dict[str, Any]]:
             "total_api_calls": total_calls,
             "success_calls": success_calls,
             "failed_calls": failed_calls,
+            "total_patients": total_patients,
             "total_photos": total_photos,
             "abnormal_photos": abnormal_photos,
-            "total_compares": total_compares
+            "total_compares": total_compares,
+            "daily_api_calls": daily_api,
+            "daily_photo_uploads": daily_photos,
+            "daily_compares": daily_compares,
+            "daily_api_quota": client.daily_api_quota,
+            "daily_photo_quota": client.daily_photo_quota,
+            "api_quota_used_pct": api_pct,
+            "photo_quota_used_pct": photo_pct,
+            "allow_compare": client.allow_compare,
+            "is_default": client.is_default
         })
     return result

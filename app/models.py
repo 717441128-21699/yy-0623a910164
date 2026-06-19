@@ -18,11 +18,33 @@ class ApiClient(Base):
     contact_email = Column(String(100), default="")
     is_active = Column(Boolean, default=True)
     settings = Column(JSON, default=dict, comment="接入方自定义配置(JSON)")
+
+    daily_api_quota = Column(Integer, default=0, comment="每日API调用上限(0表示不限)")
+    daily_photo_quota = Column(Integer, default=0, comment="每日照片上传上限(0表示不限)")
+    allow_compare = Column(Boolean, default=True, comment="是否允许生成对比图")
+    is_default = Column(Boolean, default=False, comment="是否为默认接入方(未带Key的请求归此)")
+
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
 
     callback_configs = relationship("CallbackConfig", back_populates="client")
     logs = relationship("ApiCallLog", back_populates="client")
+    daily_usages = relationship("DailyUsage", back_populates="client")
+
+
+class DailyUsage(Base):
+    __tablename__ = "daily_usages"
+
+    id = Column(Integer, primary_key=True, index=True)
+    client_id = Column(Integer, ForeignKey("api_clients.id"), nullable=False, index=True)
+    usage_date = Column(Date, nullable=False, index=True)
+    api_calls = Column(Integer, default=0, comment="当日API调用次数")
+    photo_uploads = Column(Integer, default=0, comment="当日照片上传次数")
+    compare_generations = Column(Integer, default=0, comment="当日对比生成次数")
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+
+    client = relationship("ApiClient", back_populates="daily_usages")
 
 
 class CallbackConfig(Base):
@@ -56,19 +78,42 @@ class CallbackTask(Base):
     retry_count = Column(Integer, default=0)
     max_retries = Column(Integer, default=3)
     last_error = Column(Text, default="")
+    last_response_status = Column(Integer, nullable=True, comment="最后一次推送的HTTP状态码")
+    last_response_body = Column(Text, default="", comment="最后一次推送的响应体(截断)")
     callback_url = Column(String(500), default="")
     last_sent_at = Column(DateTime(timezone=True), nullable=True)
     next_retry_at = Column(DateTime(timezone=True), nullable=True, index=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now(), index=True)
 
     config = relationship("CallbackConfig", back_populates="tasks")
+    executions = relationship("CallbackExecutionRecord", back_populates="task")
+
+
+class CallbackExecutionRecord(Base):
+    __tablename__ = "callback_execution_records"
+
+    id = Column(Integer, primary_key=True, index=True)
+    task_id = Column(Integer, ForeignKey("callback_tasks.id"), nullable=False, index=True)
+    attempt_no = Column(Integer, default=1, comment="第几次尝试")
+    callback_url = Column(String(500), default="")
+    request_headers = Column(JSON, default=dict, comment="请求头")
+    request_body = Column(Text, default="", comment="请求体(截断)")
+    response_status = Column(Integer, nullable=True, comment="响应HTTP状态码")
+    response_body = Column(Text, default="", comment="响应体(截断)")
+    duration_ms = Column(Integer, default=0, comment="耗时(ms)")
+    success = Column(Boolean, default=False)
+    error_message = Column(Text, default="", comment="错误信息")
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    task = relationship("CallbackTask", back_populates="executions")
 
 
 class Patient(Base):
     __tablename__ = "patients"
 
     id = Column(Integer, primary_key=True, index=True)
-    patient_no = Column(String(50), unique=True, index=True, nullable=False)
+    patient_no = Column(String(50), index=True, nullable=False)
+    client_id = Column(Integer, ForeignKey("api_clients.id"), nullable=True, index=True, comment="归属接入方")
     name = Column(String(100), default="")
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
@@ -82,7 +127,7 @@ class VisitRecord(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     patient_id = Column(Integer, ForeignKey("patients.id"), nullable=False)
-    client_id = Column(Integer, ForeignKey("api_clients.id"), nullable=True)
+    client_id = Column(Integer, ForeignKey("api_clients.id"), nullable=True, index=True)
     visit_date = Column(Date, nullable=False, index=True)
     is_initial = Column(Boolean, default=False)
     notes = Column(Text, default="")
@@ -98,7 +143,7 @@ class Photo(Base):
     id = Column(Integer, primary_key=True, index=True)
     patient_id = Column(Integer, ForeignKey("patients.id"), nullable=False)
     visit_record_id = Column(Integer, ForeignKey("visit_records.id"), nullable=False)
-    client_id = Column(Integer, ForeignKey("api_clients.id"), nullable=True)
+    client_id = Column(Integer, ForeignKey("api_clients.id"), nullable=True, index=True)
     angle = Column(String(50), nullable=False, index=True)
     file_path = Column(String(255), nullable=False)
     file_name = Column(String(255), nullable=False)
@@ -151,7 +196,7 @@ class CompareResult(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     patient_id = Column(Integer, ForeignKey("patients.id"), nullable=False)
-    client_id = Column(Integer, ForeignKey("api_clients.id"), nullable=True)
+    client_id = Column(Integer, ForeignKey("api_clients.id"), nullable=True, index=True)
     compare_mode = Column(String(50), nullable=False)
     before_visit_id = Column(Integer, ForeignKey("visit_records.id"), nullable=False)
     after_visit_id = Column(Integer, ForeignKey("visit_records.id"), nullable=False)
